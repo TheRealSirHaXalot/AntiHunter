@@ -1,33 +1,36 @@
+#include "main.h"
+#include <SPI.h>
 #include <Arduino.h>
 #include <Preferences.h>
 #include "network.h"
 #include "scanner.h" 
 #include "hardware.h"
+#include <SD.h>
+#include <TinyGPSPlus.h>
+#include <HardwareSerial.h>
+#include "esp_wifi.h"
 
-// Global configuration
+
 Preferences prefs;
-volatile bool stopRequested = false;
-static String meshInBuffer = "";
-
-// Global state
-ScanMode currentScanMode = SCAN_WIFI;
 int cfgBeeps = 2;
 int cfgGapMs = 80;
-String lastResults;
-std::vector<uint8_t> CHANNELS;
+ScanMode currentScanMode = SCAN_WIFI;
+std::vector<uint8_t> CHANNELS = {1, 6, 11};
+volatile bool stopRequested = false;
 
-// Task handles
 TaskHandle_t workerTaskHandle = nullptr;
 TaskHandle_t blueTeamTaskHandle = nullptr;
 
-// Mesh message catching
+std::string antihunter::lastResults = "No scan data yet.";
+std::mutex antihunter::lastResultsMutex;
+
 void uartForwardTask(void *parameter) {
   static String meshBuffer = "";
   
   for (;;) {
     while (Serial1.available()) {
       char c = Serial1.read();
-      Serial.write(c);  // Echo raw data from UART
+      Serial.write(c);
       
       if (c == '\n' || c == '\r') {
         if (meshBuffer.length() > 0) {
@@ -51,7 +54,6 @@ void uartForwardTask(void *parameter) {
   }
 }
 
-// Helper functions
 String macFmt6(const uint8_t *m) {
     char b[18];
     snprintf(b, sizeof(b), "%02X:%02X:%02X:%02X:%02X:%02X", 
@@ -118,18 +120,29 @@ void setup() {
     delay(300);
     Serial.println("\n=== Antihunter v5 Boot ===");
     Serial.println("WiFi+BLE dual-mode scanner");
+    
     delay(1000);
 
     initializeHardware();
+    delay(10);
+    initializeNetwork();  // starts AP and mesh UART
+    delay(500);
     initializeSD();
     initializeGPS();
-    delay(1200);
+    delay(500);
     initializeVibrationSensor();
     initializeScanner();
-    initializeNetwork();
     
-    xTaskCreatePinnedToCore(uartForwardTask, "UARTForwardTask", 4096, NULL, 1, NULL, 1);
+    xTaskCreatePinnedToCore(uartForwardTask, "UARTForwardTask", 4096, NULL, 2, NULL, 1);
     delay(120);
+
+    esp_task_wdt_deinit();  // Clean any existing config
+    esp_task_wdt_config_t wdt_config = {
+        .timeout_ms = 30000,  // Increase timeout to 30 seconds
+        .idle_core_mask = 0,  // Don't monitor idle tasks
+        .trigger_panic = true
+    };
+    esp_task_wdt_init(&wdt_config);
 
     Serial.println("=== Boot Complete ===");
     Serial.printf("Web UI: http://192.168.4.1/ (SSID: %s, PASS: %s)\n", AP_SSID, AP_PASS);
@@ -138,7 +151,8 @@ void setup() {
 
 void loop() {
     updateGPSLocation();
-    processUSBToMesh(); // Always look for new mesh serial messages
-    checkAndSendVibrationAlert(); // Continuous vibration sensing
-    delay(1550);
+    // updateTemperature(); 
+    processUSBToMesh();
+    //checkAndSendVibrationAlert();
+    delay(1000);
 }

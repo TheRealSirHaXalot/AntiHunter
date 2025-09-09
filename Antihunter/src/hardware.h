@@ -1,7 +1,7 @@
 #pragma once
-#include <Arduino.h>
-#include <Preferences.h>
-#include <WiFi.h>
+#include "scanner.h"
+#include "network.h"
+#include "main.h"
 
 #ifndef COUNTRY
 #define COUNTRY "NO"
@@ -13,7 +13,7 @@
 #define BUZZER_IS_PASSIVE 1
 #endif
 #ifndef MESH_RX_PIN
-#define MESH_RX_PIN 4   // MESH PIN 20      (GPIO4)
+#define MESH_RX_PIN 6   // MESH PIN 20      (GPIO4)
 #endif
 #ifndef MESH_TX_PIN
 #define MESH_TX_PIN 5    // MESH PIN 19     (GPIO5)
@@ -21,6 +21,8 @@
 #ifndef VIBRATION_PIN
 #define VIBRATION_PIN 1  // SW-420 PIN D0   (GPIO1)
 #endif
+
+#define TEMP_SENSOR_PIN 6
 
 // SD Card (SPI)
 #define SD_CS_PIN   2    // CS on D1        (GPIO2)
@@ -56,3 +58,6 @@ int getGapMs();
 void logToSD(const String &data);
 String getGPSData();
 void updateGPSLocation();
+extern float ambientTemp;
+extern bool tempSensorAvailable;
+void updateTemperature();

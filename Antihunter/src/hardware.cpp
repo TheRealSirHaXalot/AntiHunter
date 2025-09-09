@@ -1,10 +1,14 @@
 #include "hardware.h"
-#include "scanner.h"
-#include "network.h"
+#include <Arduino.h>
+#include <Preferences.h>
+#include <WiFi.h>
 #include <SPI.h>
 #include <SD.h>
 #include <TinyGPSPlus.h>
 #include <HardwareSerial.h>
+#include "esp_wifi.h"
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
 extern Preferences prefs;
 extern int cfgBeeps, cfgGapMs;
@@ -18,6 +22,12 @@ bool sdAvailable = false;
 String lastGPSData = "No GPS data";
 float gpsLat = 0.0, gpsLon = 0.0;
 bool gpsValid = false;
+
+// Temp
+OneWire oneWire(TEMP_SENSOR_PIN);
+DallasTemperature tempSensor(&oneWire);
+float ambientTemp = 0.0;
+bool tempSensorAvailable = false;
 
 // Viration Sensor
 volatile bool vibrationDetected = false;
@@ -116,6 +126,28 @@ void initializeHardware()
         prefs.putString("nodeId", nodeId);
     }
     setNodeId(nodeId);
+
+    // Initialize DS18B20 temperature sensor (optional)
+    Serial.println("Checking for DS18B20 temperature sensor...");
+    tempSensor.begin();
+    delay(100);
+    
+    if (tempSensor.getDeviceCount() > 0) {
+        tempSensor.requestTemperatures();
+        float testTemp = tempSensor.getTempCByIndex(0);
+        
+        if (testTemp != DEVICE_DISCONNECTED_C && testTemp > -50 && testTemp < 85) {
+            tempSensorAvailable = true;
+            ambientTemp = testTemp;
+            Serial.printf("[DS18B20] Temperature sensor found: %.1f°C\n", ambientTemp);
+        } else {
+            tempSensorAvailable = false;
+            Serial.println("[DS18B20] Sensor connected but reading invalid");
+        }
+    } else {
+        tempSensorAvailable = false;
+        Serial.println("[DS18B20] No temperature sensor found (optional)");
+    }
 
     Serial.printf("Hardware initialized: beeps=%d, gap=%dms, nodeID=%s\n", cfgBeeps, cfgGapMs, nodeId);
 }
@@ -226,6 +258,13 @@ String getDiagnostics() {
 
     s += "Last scan secs: " + String((unsigned)lastScanSecs) + (lastScanForever ? " (forever)" : "") + "\n";
 
+    // DS18B20 Ambient Temperature
+    if (tempSensorAvailable) {
+        updateTemperature();
+        float temp_f = (ambientTemp * 9.0 / 5.0) + 32.0;
+        s += "Ambient Temp: " + String(ambientTemp, 1) + "°C / " + String(temp_f, 1) + "°F\n";
+    }
+
     float temp_c = temperatureRead();
     float temp_f = (temp_c * 9.0 / 5.0) + 32.0;
     s += "ESP32 Temp: " + String(temp_c, 1) + "°C / " + String(temp_f, 1) + "°F\n";
@@ -246,12 +285,10 @@ void initializeSD()
     Serial.println("Initializing SD card...");
     Serial.printf("[SD] Pins SCK=%d MISO=%d MOSI=%d CS=%d\n", SD_CLK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
 
-    // Reset SPI bus
     SPI.end();
     SPI.begin(SD_CLK_PIN, SD_MISO_PIN, SD_MOSI_PIN);
-    delay(100); // Allow SPI bus to stabilize
+    delay(100);
 
-    // Try multiple frequencies
     const uint32_t tryFreqs[] = {1000000, 4000000, 8000000, 10000000};
     for (uint32_t f : tryFreqs)
     {
@@ -261,7 +298,6 @@ void initializeSD()
             Serial.println("SD card initialized successfully");
             sdAvailable = true;
 
-            // Print SD card details
             uint8_t cardType = SD.cardType();
             Serial.print("SD Card Type: ");
             if (cardType == CARD_MMC)
@@ -321,19 +357,41 @@ void initializeGPS() {
     Serial.printf("[GPS] UART on RX:%d TX:%d\n", GPS_RX_PIN, GPS_TX_PIN);
 }
 
-void logToSD(const String &data)
-{
-    if (!sdAvailable)
-        return;
-
+void logToSD(const String &data) {
+    if (!sdAvailable) return;
+    
+    // Ensure directory exists
+    if (!SD.exists("/")) {
+        SD.mkdir("/");
+    }
+    
     File logFile = SD.open("/antihunter.log", FILE_APPEND);
-    if (logFile)
-    {
-        logFile.print("[");
-        logFile.print(millis());
-        logFile.print("] ");
-        logFile.println(data);
-        logFile.close();
+    if (!logFile) {
+        // Try to recreate the file
+        logFile = SD.open("/antihunter.log", FILE_WRITE);
+        if (!logFile) {
+            Serial.println("[SD] Failed to open log file");
+            return;
+        }
+    }
+    
+    // Write with timestamp
+    logFile.print("[");
+    logFile.print(millis());
+    logFile.print("] ");
+    logFile.println(data);
+    logFile.flush();  // Force write, TODO test in long operations
+    logFile.close();
+    
+    // Verify write
+    static unsigned long lastSizeCheck = 0;
+    if (millis() - lastSizeCheck > 10000) {
+        File checkFile = SD.open("/antihunter.log", FILE_READ);
+        if (checkFile) {
+            Serial.printf("[SD] Log file size: %lu bytes\n", checkFile.size());
+            checkFile.close();
+        }
+        lastSizeCheck = millis();
     }
 }
 
@@ -477,5 +535,26 @@ void checkAndSendVibrationAlert() {
         } else {
             Serial.printf("[VIBRATION] Alert rate limited - %lums since last alert\n", millis() - lastVibrationAlert);
         }
+    }
+}
+
+void updateTemperature() {
+    static unsigned long lastTempRead = 0;
+    
+    if (!tempSensorAvailable) return;
+    
+    // Only read every 10 seconds to avoid blocking
+    if (millis() - lastTempRead < 10000) return;
+    lastTempRead = millis();
+    
+    tempSensor.requestTemperatures();
+    float newTemp = tempSensor.getTempCByIndex(0);
+    
+    if (newTemp != DEVICE_DISCONNECTED_C && newTemp > -50 && newTemp < 85) {
+        ambientTemp = newTemp;
+    } else {
+        // Sensor disconnected or error
+        tempSensorAvailable = false;
+        Serial.println("[DS18B20] Temperature sensor error");
     }
 }
